@@ -4,11 +4,14 @@ const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
+const { OAuth2Client } = require("google-auth-library");
 
 const {
   generateAccessToken,
   generateRefreshToken,
 } = require("../utils/generateToken");
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 /*
 SIGNUP CONTROLLER
@@ -18,18 +21,17 @@ SIGNUP CONTROLLER
 exports.signUp = asyncHandler(async (req, res) => {
   const { name, email, password } = req.body;
 
+  if (!name || !email || !password) {
+    throw new AppError("Name, email and password are required", 400);
+  }
+
   const existingUser = await User.findOne({ email });
   if (existingUser) {
     throw new AppError("User already exists", 409);
   }
 
-  const newUser = await User.create({
-    name,
-    email,
-    password,
-  });
+  const newUser = await User.create({ name, email, password });
 
-  // Remove password from response
   newUser.password = undefined;
 
   return res.status(201).json({
@@ -47,10 +49,14 @@ LOGIN CONTROLLER
 exports.login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
+  if (!email || !password) {
+    throw new AppError("Email and password are required", 400);
+  }
+
   const user = await User.findOne({ email }).select("+password");
 
   if (!user) {
-    throw new AppError("User not found", 404);
+    throw new AppError("Invalid credentials", 401); // don't reveal "user not found"
   }
 
   // Block login if user is Google-only (no password set)
@@ -130,23 +136,33 @@ exports.refreshAccessToken = asyncHandler(async (req, res) => {
 /*
 GOOGLE AUTH CONTROLLER
   • Handles login/signup via Google
-  • Links account if user already exists
+  • Links account if user already exists with same email
 */
 exports.googleAuthController = asyncHandler(async (req, res) => {
-  const { email, name, googleId } = req.body;
+  const { idToken } = req.body;
 
-  if (!email || !googleId || !name) {
-    throw new AppError("Invalid Google data", 400);
+  if (!idToken) {
+    throw new AppError("Google ID token is required", 400);
   }
+
+  // Verify the token with Google — don't trust client-sent email/googleId directly
+  let payload;
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    payload = ticket.getPayload();
+  } catch (err) {
+    throw new AppError("Invalid Google token", 401);
+  }
+
+  const { email, name, sub: googleId } = payload;
 
   let user = await User.findOne({ email });
 
   if (!user) {
-    user = await User.create({
-      name,
-      email,
-      googleId,
-    });
+    user = await User.create({ name, email, googleId });
   } else {
     if (!user.googleId) {
       user.googleId = googleId;
@@ -193,7 +209,7 @@ exports.logout = asyncHandler(async (req, res) => {
 
 /*
 SET PASSWORD (FOR GOOGLE USERS)
-  • Allows Google-authenticated users to set a password
+  • Allows Google-authenticated users to add a password to their account
 */
 exports.setPassword = asyncHandler(async (req, res) => {
   const { password } = req.body;
@@ -209,7 +225,7 @@ exports.setPassword = asyncHandler(async (req, res) => {
   }
 
   user.password = password;
-  await user.save();
+  await user.save(); // triggers pre-save hash hook
 
   return res.status(200).json({
     status: "success",
@@ -243,10 +259,15 @@ exports.deleteUser = asyncHandler(async (req, res) => {
 
 /*
 FORGOT PASSWORD
-  • Generates reset token and stores hashed version
+  • Generates a reset token and stores hashed version in DB
+  • NOTE: In production, send resetURL via email — never expose it in the response
 */
 exports.forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
+
+  if (!email) {
+    throw new AppError("Email is required", 400);
+  }
 
   const user = await User.findOne({ email });
   if (!user) {
@@ -256,12 +277,13 @@ exports.forgotPassword = asyncHandler(async (req, res) => {
   const resetToken = user.createPasswordResetToken();
   await user.save({ validateBeforeSave: false });
 
-  // Fixed the template literal logic here as well
-  const resetURL = `http://localhost:3000/reset-password/${resetToken}`;
+  const resetURL = `${process.env.CLIENT_URL || "http://localhost:3000"}/reset-password/${resetToken}`;
 
+  // TODO: Send resetURL via email (e.g. using Nodemailer/Resend)
+  // For dev only — remove before production
   return res.status(200).json({
     status: "success",
-    message: "Reset token generated",
+    message: "Reset token generated. Send this via email in production.",
     resetURL,
   });
 });
@@ -269,11 +291,15 @@ exports.forgotPassword = asyncHandler(async (req, res) => {
 /*
 RESET PASSWORD
   • Verifies token
-  • Updates password
+  • Updates password and clears reset fields
 */
 exports.resetPassword = asyncHandler(async (req, res) => {
   const { token } = req.params;
   const { password } = req.body;
+
+  if (!password) {
+    throw new AppError("New password is required", 400);
+  }
 
   const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
@@ -290,7 +316,7 @@ exports.resetPassword = asyncHandler(async (req, res) => {
   user.passwordResetToken = undefined;
   user.passwordResetExpires = undefined;
 
-  await user.save();
+  await user.save(); // triggers pre-save hash hook
 
   return res.status(200).json({
     status: "success",

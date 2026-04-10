@@ -41,7 +41,7 @@ app.use((err, req, res, next) => {
 
   // production -> operational
   if (err.isOperational) {
-    return res.status({
+    return res.status(err.statusCode).json({
       status: err.status,
       message: err.message,
     });
