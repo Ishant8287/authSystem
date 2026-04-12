@@ -1,4 +1,4 @@
-# Authentication System — Node.js + JWT
+# 🔐 Authentication System (Node.js + JWT)
 
 A production-style authentication system built using Node.js, Express, MongoDB, and JWT. This project demonstrates secure user authentication, token-based authorization, and scalable backend architecture.
 
